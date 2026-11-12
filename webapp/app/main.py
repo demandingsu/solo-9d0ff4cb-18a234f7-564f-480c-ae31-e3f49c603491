@@ -10,6 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
+from .attachment_verifier import verify_crawl_report
 from .crawler import REQUEST_TIMEOUT, USER_AGENT, crawl
 from .merger import merge_announcements
 
@@ -26,11 +27,13 @@ def index(request: Request, url: str | None = None) -> HTMLResponse:
         "entry_url": url or "",
         "report": None,
         "results": None,
+        "attachments": None,
     }
     if url and url.strip():
         report = crawl(url.strip())
         context["report"] = report
         context["results"] = merge_announcements(report.announcements)
+        context["attachments"] = verify_crawl_report(report)
     return templates.TemplateResponse("index.html", context)
 
 

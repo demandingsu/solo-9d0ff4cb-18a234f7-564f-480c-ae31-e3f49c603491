@@ -8,62 +8,127 @@
   P5 只有原始招标公告              -> 有效，沿用原截止时间
   P6 公告未公布任何截止时间        -> 未公布
 列表页分两页，通过“下一页”链接串联，验证分页抓取。
+
+附件核验场景：
+  - 同一附件 URL 被两条公告引用（相同摘要） -> 只下载一次，结果一致
+  - 标注摘要与实际文件不符                 -> 不一致
+  - 同一 URL 在不同公告标注不同摘要         -> 标注冲突（逐条保留，不任选一条）
+  - 附件链接指向不存在的文件               -> 无法核验（下载失败）
+  - 附件超过 5 MiB                         -> 无法核验（超限）
+  - 公告未给附件标注摘要                   -> 无法核验（缺少标注）
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import random
 from pathlib import Path
 
 OUTPUT = Path(__file__).resolve().parent / "site"
 
-# (项目编号, 项目名称, 公告类型, 发布时间, 截止时间或 None, 标题, 正文补充)
-NOTICES: list[tuple[str, str, str, str, str | None, str, str]] = [
+# (项目编号, 项目名称, 公告类型, 发布时间, 截止时间或 None, 标题, 正文补充, 附件列表)
+# 附件列表元素：(相对链接, 链接文字, 标注摘要或 None, 是否写出标注标签)
+NOTICES: list[tuple[str, str, str, str, str | None, str, str, list[tuple[str, str, str | None]]]] = [
     # --- P1：更正公告写明新截止时间 ---
     ("CG-2026-001", "市政道路养护设备采购", "招标公告", "2026-10-08 09:00:00",
      "2026-10-30 14:30:00", "市政道路养护设备采购招标公告",
-     "欢迎符合条件的供应商参加投标。"),
+     "欢迎符合条件的供应商参加投标。",
+     [("../files/CG-2026-001-tender.pdf", "招标文件（PDF）", "MATCH")]),
     ("CG-2026-001", "市政道路养护设备采购", "更正公告", "2026-10-15 16:20:00",
      "2026-11-06 10:00:00", "市政道路养护设备采购更正公告",
-     "因采购需求调整，现将投标截止时间延期至更正公告载明的新时间，请各投标人知悉。"),
+     "因采购需求调整，现将投标截止时间延期至更正公告载明的新时间，请各投标人知悉。",
+     [("../files/CG-2026-001-tender.pdf", "招标文件（PDF）", "MATCH")]),
 
     # --- P2：延期公告写明新截止时间 ---
     ("CG-2026-002", "校园智慧图书馆系统采购", "招标公告", "2026-09-25 10:00:00",
      "2026-10-20 09:30:00", "校园智慧图书馆系统采购项目招标公告",
-     "本项目采用公开招标方式，详见招标文件。"),
+     "本项目采用公开招标方式，详见招标文件。",
+     [("../files/CG-2026-002-tender.zip", "招标文件压缩包", "WRONG")]),
     ("CG-2026-002", "校园智慧图书馆系统采购", "延期公告", "2026-10-16 11:00:00",
      "2026-10-28 15:00:00", "校园智慧图书馆系统采购项目延期公告",
-     "因接到答疑申请，投标截止时间顺延至本公告载明的新时间，开标时间同步调整。"),
+     "因接到答疑申请，投标截止时间顺延至本公告载明的新时间，开标时间同步调整。",
+     []),
 
     # --- P3：延期公告声明延期，但没有给出新截止时间 ---
     ("CG-2026-003", "医院影像设备维保服务采购", "招标公告", "2026-10-02 08:45:00",
      "2026-10-25 09:00:00", "医院影像设备维保服务采购招标公告",
-     "投标人须在截止时间前完成电子投标文件递交。"),
+     "投标人须在截止时间前完成电子投标文件递交。",
+     [("../files/CG-2026-003-tender.pdf", "招标文件（PDF）", "CONFLICT_A")]),
     ("CG-2026-003", "医院影像设备维保服务采购", "延期公告", "2026-10-21 17:30:00",
      None, "医院影像设备维保服务采购延期公告",
-     "因评审安排冲突，本项目投标截止时间需要延期，具体新的投标截止时间将另行公告通知。"),
+     "因评审安排冲突，本项目投标截止时间需要延期，具体新的投标截止时间将另行公告通知。",
+     [("../files/CG-2026-003-tender.pdf", "招标文件（PDF）", "CONFLICT_B")]),
 
     # --- P4：两次更正，先给新时间、后只声明延期 ---
     ("CG-2026-004", "政务云平台扩容采购", "招标公告", "2026-09-20 09:00:00",
      "2026-10-12 14:00:00", "政务云平台扩容采购招标公告",
-     "本项目不接受联合体投标。"),
+     "本项目不接受联合体投标。",
+     []),
     ("CG-2026-004", "政务云平台扩容采购", "更正公告", "2026-10-01 15:10:00",
      "2026-10-22 14:00:00", "政务云平台扩容采购更正公告",
-     "现对招标文件部分参数进行更正，投标截止时间相应延期至新时间。"),
+     "现对招标文件部分参数进行更正，投标截止时间相应延期至新时间。",
+     [("../files/CG-2026-004-clarification.pdf", "更正后招标文件", "MATCH")]),
     ("CG-2026-004", "政务云平台扩容采购", "延期公告", "2026-10-19 10:05:00",
      None, "政务云平台扩容采购延期公告",
-     "因上级系统升级，开标场地无法按时使用，本项目投标及开标将顺延，新时间另行通知。"),
+     "因上级系统升级，开标场地无法按时使用，本项目投标及开标将顺延，新时间另行通知。",
+     [("../files/CG-2026-004-missing.pdf", "答疑文件（下载失败示例）", "MISSING")]),
 
     # --- P5：仅有原始招标公告 ---
     ("CG-2026-005", "公办幼儿园教具采购", "招标公告", "2026-10-10 13:30:00",
      "2026-11-02 09:30:00", "公办幼儿园教具采购招标公告",
-     "欢迎合格供应商参与投标。"),
+     "欢迎合格供应商参与投标。",
+     [("../files/CG-2026-005-drawings.zip", "图纸（未标摘要示例）", None)]),
 
     # --- P6：公告未公布任何投标截止时间 ---
     ("CG-2026-006", "档案馆数字化加工服务采购", "招标公告", "2026-10-12 10:40:00",
      None, "档案馆数字化加工服务采购招标公告",
-     "本项目采用竞争性方式采购，具体投标安排详见后续通知。"),
+     "本项目采用竞争性方式采购，具体投标安排详见后续通知。",
+     [("../files/CG-2026-006-archive.zip", "档案扫描件（超限示例）", "MATCH")]),
 ]
+
+# 需要生成的真实文件内容：(相对链接, 字节内容)；超限文件单独生成
+FILES: dict[str, bytes] = {
+    "../files/CG-2026-001-tender.pdf": "示例招标文件 PDF 内容（第一版）\n".encode("utf-8"),
+    "../files/CG-2026-002-tender.zip": "示例招标文件压缩包内容\n".encode("utf-8"),
+    "../files/CG-2026-003-tender.pdf": "示例影像设备维保招标文件\n".encode("utf-8"),
+    "../files/CG-2026-004-clarification.pdf": "更正后的招标文件内容\n".encode("utf-8"),
+    "../files/CG-2026-005-drawings.zip": "示例图纸压缩包（本公告未标摘要）\n".encode("utf-8"),
+}
+LARGE_FILE = "../files/CG-2026-006-archive.zip"
+LARGE_FILE_SIZE = 5 * 1024 * 1024 + 512 * 1024  # 超过 5 MiB 上限
+
+# 固定“错误摘要”，模拟公告标注与实际文件不符
+WRONG_DIGEST = hashlib.sha256("另一个版本的文件内容".encode("utf-8")).hexdigest()
+CONFLICT_DIGEST_A = hashlib.sha256("冲突版本 A".encode("utf-8")).hexdigest()
+CONFLICT_DIGEST_B = hashlib.sha256("冲突版本 B".encode("utf-8")).hexdigest()
+
+
+def file_digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def on_disk_path(href: str) -> Path:
+    """附件链接是相对详情页（site/detail/）的，换算为磁盘上的 site 内路径。"""
+    return (OUTPUT / "detail" / href).resolve()
+
+
+def resolve_digest(marker: str | None, file_path: Path) -> str | None:
+    """把场景标记解析成需要写在页面上的标注摘要。"""
+    if marker is None:
+        return None
+    if marker == "MATCH":
+        return file_digest(file_path)
+    if marker == "WRONG":
+        return WRONG_DIGEST
+    if marker == "CONFLICT_A":
+        return CONFLICT_DIGEST_A
+    if marker == "CONFLICT_B":
+        return CONFLICT_DIGEST_B
+    if marker == "MISSING":
+        # 下载失败示例：标注了一个摘要，但目标文件不存在
+        return hashlib.sha256(b"missing-file-placeholder").hexdigest()
+    raise ValueError(f"未知附件场景标记：{marker}")
+
 
 FIELD_LABELS = [
     ("project_no", "项目编号"),
@@ -77,8 +142,35 @@ def detail_filename(index: int) -> str:
     return f"notice_{index:03d}.html"
 
 
+def build_attachments(attachments: list[tuple[str, str, str | None]], url_root: Path) -> str:
+    if not attachments:
+        return ""
+    items = []
+    for href, label, marker in attachments:
+        target = on_disk_path(href)
+        digest = resolve_digest(marker, target)
+        digest_html = (
+            f'<span class="digest">SHA-256：<code>{html.escape(digest)}</code></span>'
+            if digest
+            else '<span class="digest digest-missing">（本公告未标注 SHA-256）</span>'
+        )
+        items.append(
+            f'      <li class="attachment-item">'
+            f'<a class="attachment" href="{html.escape(href)}">{html.escape(label)}</a>'
+            f'{digest_html}</li>'
+        )
+    return f"""
+  <div class="attachments">
+    <h2>附件</h2>
+    <ul class="attachment-list">
+{chr(10).join(items)}
+    </ul>
+  </div>
+"""
+
+
 def build_detail(notice: tuple, index: int) -> str:
-    project_no, project_name, notice_type, publish_time, deadline, title, body = notice
+    project_no, project_name, notice_type, publish_time, deadline, title, body, attachments = notice
     rng = random.Random(index)
 
     # 打乱字段顺序，模拟不同页面模板；无新时间的延期页不输出截止时间字段
@@ -97,6 +189,17 @@ def build_detail(notice: tuple, index: int) -> str:
     rng.shuffle(rows)
     table = "\n      ".join(rows)
 
+    # 生成真实附件文件，供核验时下载；MISSING 场景刻意不生成，模拟下载失败
+    for href, _label, marker in attachments:
+        if marker == "MISSING":
+            continue
+        target = on_disk_path(href)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_bytes(FILES.get(href, b""))
+
+    attachment_html = build_attachments(attachments, OUTPUT)
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -114,8 +217,7 @@ def build_detail(notice: tuple, index: int) -> str:
   <div class="content">
     <p>{html.escape(body)}</p>
     <p>采购代理人请以本平台正式公告内容为准，按时完成投标文件递交。</p>
-  </div>
-</div>
+  </div>{attachment_html}</div>
 </body>
 </html>
 """
@@ -196,6 +298,15 @@ ul.notice-list li { border-bottom:1px solid #eef1f5; }
 .pager a, .pager .disabled { display:inline-block; padding:7px 16px; border:1px solid #cbd5e1; border-radius:6px; font-size:13px; }
 .pager a { background:#1d4ed8; color:#fff; text-decoration:none; border-color:#1d4ed8; }
 .pager .disabled { color:#94a3b8; background:#f1f5f9; }
+.attachments { margin-top:22px; border-top:1px dashed #d7dde5; padding-top:14px; }
+.attachments h2 { font-size:15px; margin:0 0 10px; }
+ul.attachment-list { list-style:none; margin:0; padding:0; }
+ul.attachment-list li { margin-bottom:8px; font-size:13px; line-height:1.9; }
+a.attachment { color:#1d4ed8; text-decoration:none; margin-right:12px; }
+a.attachment:hover { text-decoration:underline; }
+.digest { color:#475569; font-size:12px; }
+.digest code { font-family:ui-monospace,Menlo,Consolas,monospace; word-break:break-all; }
+.digest-missing { color:#9a3412; }
 """
 
 
@@ -203,6 +314,12 @@ def main() -> None:
     (OUTPUT / "list").mkdir(parents=True, exist_ok=True)
     (OUTPUT / "detail").mkdir(parents=True, exist_ok=True)
     (OUTPUT / "assets").mkdir(parents=True, exist_ok=True)
+    (OUTPUT / "files").mkdir(parents=True, exist_ok=True)
+
+    # 超过 5 MiB 的附件（核验时应显示“无法核验”）
+    large_path = on_disk_path(LARGE_FILE)
+    if not large_path.exists():
+        large_path.write_bytes(b"PK\x03\x04" + b"0" * (LARGE_FILE_SIZE - 4))
 
     indexed = list(enumerate(NOTICES, start=1))
     # 列表页按发布时间倒序（最新在前），分两页

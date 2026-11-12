@@ -34,6 +34,16 @@ class CrawlReport:
     visited_list_pages: list[str] = field(default_factory=list)
     skipped_urls: list[tuple[str, str]] = field(default_factory=list)  # (url, 原因)
     errors: list[str] = field(default_factory=list)
+    incomplete_reasons: list[str] = field(default_factory=list)  # 目录/详情采集不完整的原因
+
+    @property
+    def incomplete(self) -> bool:
+        """目录或详情采集不完整时，附件核验不能宣称全部通过。"""
+        return bool(self.incomplete_reasons)
+
+    def mark_incomplete(self, reason: str) -> None:
+        if reason not in self.incomplete_reasons:
+            self.incomplete_reasons.append(reason)
 
 
 def _normalize_url(base: str, href: str) -> str | None:
@@ -125,6 +135,7 @@ def crawl(entry_url: str) -> CrawlReport:
                 response.raise_for_status()
             except httpx.HTTPError as exc:
                 report.errors.append(f"列表页抓取失败 {list_url}：{exc}")
+                report.mark_incomplete(f"列表页抓取失败：{list_url}")
                 continue
 
             detail_urls, next_page = _extract_list_links(response.text, str(response.url))
@@ -133,11 +144,13 @@ def crawl(entry_url: str) -> CrawlReport:
             for detail_url in detail_urls:
                 if len(visited_details) >= MAX_DETAIL_PAGES:
                     report.skipped_urls.append((detail_url, "达到详情页数量上限"))
+                    report.mark_incomplete("详情页数量达到上限，部分公告未抓取")
                     continue
                 if detail_url in visited_details:
                     continue
                 if not same_origin(entry_url, detail_url):
                     report.skipped_urls.append((detail_url, "与入口不同站点，已跳过"))
+                    report.mark_incomplete(f"详情链接与入口不同站点，未抓取：{detail_url}")
                     continue
                 visited_details.add(detail_url)
                 try:
@@ -145,18 +158,28 @@ def crawl(entry_url: str) -> CrawlReport:
                     detail_resp.raise_for_status()
                 except httpx.HTTPError as exc:
                     report.errors.append(f"详情页抓取失败 {detail_url}：{exc}")
+                    report.mark_incomplete(f"详情页抓取失败：{detail_url}")
                     continue
                 try:
                     announcement = parse_detail(detail_resp.text, str(detail_resp.url))
                 except ValueError as exc:
                     report.skipped_urls.append((detail_url, str(exc)))
+                    report.mark_incomplete(f"详情页无法解析：{detail_url}")
                     continue
                 report.announcements.append(announcement)
 
             # 3. 同站点下一页
             if next_page and next_page not in visited_lists and same_origin(entry_url, next_page):
-                queue.append(next_page)
+                if len(visited_lists) >= MAX_LIST_PAGES:
+                    report.mark_incomplete("列表页数量达到上限，“下一页”未继续跟随")
+                else:
+                    queue.append(next_page)
             elif next_page and not same_origin(entry_url, next_page):
                 report.skipped_urls.append((next_page, "下一页指向不同站点，已停止跟随"))
+                report.mark_incomplete("“下一页”指向不同站点，列表目录可能不完整")
+
+    # 列表遍历结束时仍有排队页面（达到上限）也视为目录不完整
+    if queue:
+        report.mark_incomplete("列表页数量达到上限，仍有未遍历的列表页")
 
     return report

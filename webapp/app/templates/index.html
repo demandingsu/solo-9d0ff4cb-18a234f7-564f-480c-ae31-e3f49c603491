@@ -32,6 +32,21 @@
   .badge-有效 { background: #dcfce7; color: #166534; }
   .badge-待核实 { background: #ffedd5; color: #9a3412; }
   .badge-未公布 { background: #e2e8f0; color: #475569; }
+  .badge-一致 { background: #dcfce7; color: #166534; }
+  .badge-不一致 { background: #fee2e2; color: #991b1b; }
+  .badge-标注冲突 { background: #ede9fe; color: #5b21b6; }
+  .badge-无法核验 { background: #fef3c7; color: #92400e; }
+  .digest { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 11px; word-break: break-all; }
+  .ann-digest { margin-bottom: 3px; }
+  .sources { list-style: none; margin: 0; padding: 0; }
+  .sources li { margin-bottom: 6px; font-size: 12px; }
+  .sources a { color: #1d4ed8; text-decoration: none; }
+  .sources a:hover { text-decoration: underline; }
+  .verify-banner { border-radius: 8px; padding: 12px 16px; font-size: 13px; margin-bottom: 14px; }
+  .verify-ok { background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; }
+  .verify-fail { background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; }
+  .verify-incomplete { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; margin-top: 10px; }
   .deadline-pending { color: #9a3412; font-weight: 600; }
   .note { color: #64748b; font-size: 12px; margin-top: 4px; }
   details { margin-top: 8px; }
@@ -53,7 +68,7 @@
 <body>
 <header>
   <h1>招标延期核对助手</h1>
-  <p>输入招标公告列表页地址，沿同站点“下一页”抓取详情，按项目编号归并公告并核对当前投标截止时间。</p>
+  <p>输入招标公告列表页地址，沿同站点“下一页”抓取详情，按项目编号归并公告并核对当前投标截止时间，同时核验公告附件的 SHA-256 摘要。</p>
 </header>
 <main>
   <div class="card">
@@ -75,6 +90,8 @@
       <span>归并项目：{{ results|length }} 个</span>
       <span>跳过链接：{{ report.skipped_urls|length }} 个</span>
       <span>抓取错误：{{ report.errors|length }} 个</span>
+      {% if report.incomplete %}<span style="background:#fef2f2;border-color:#fecaca;color:#991b1b;">采集不完整</span>
+      {% else %}<span>采集完整</span>{% endif %}
     </div>
     {% if report.visited_list_pages %}
     <table>
@@ -99,6 +116,93 @@
     <div class="errors" style="margin-top:12px;">
       <strong>抓取错误</strong>
       <ul>{% for err in report.errors %}<li>{{ err }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+    {% if report.incomplete %}
+    <div class="errors verify-incomplete">
+      <strong>目录或详情采集不完整，不能宣称全部附件通过</strong>
+      <ul>{% for reason in report.incomplete_reasons %}<li>{{ reason }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>招标文件附件核验（SHA-256）</h2>
+    {% if attachments.incomplete %}
+    <div class="verify-banner verify-fail">
+      本次目录或详情采集不完整，无法确认已覆盖全部公告与附件；<strong>不得宣称全部附件通过</strong>，
+      请先解决采集问题后重新核验。
+    </div>
+    {% elif attachments.all_verified %}
+    <div class="verify-banner verify-ok">
+      已核验 {{ attachments.attachments|length }} 个附件，实际文件 SHA-256 与公告标注全部一致。
+    </div>
+    {% elif attachments.attachments %}
+    <div class="verify-banner verify-fail">
+      本次共核验 {{ attachments.attachments|length }} 个附件，其中
+      {{ attachments.matched_count }} 个一致、{{ attachments.mismatch_count }} 个不一致、
+      {{ attachments.conflict_count }} 个标注冲突、{{ attachments.unverifiable_count }} 个无法核验；
+      <strong>不能宣称全部附件通过</strong>。
+    </div>
+    {% else %}
+    <div class="empty">已抓取的公告详情中未发现附件链接。</div>
+    {% endif %}
+
+    {% if attachments.attachments %}
+    <table>
+      <thead>
+        <tr>
+          <th>附件</th>
+          <th>核验结果</th>
+          <th>实际 SHA-256 / 大小</th>
+          <th>公告标注与来源（同一 URL 只下载一次，逐条保留标注）</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for att in attachments.attachments %}
+        <tr>
+          <td style="word-break:break-all;">
+            <a href="/asset?url={{ att.url|urlencode }}" target="_blank" rel="noopener noreferrer">{{ att.filename or att.url }}</a>
+            <div class="note digest">{{ att.url }}</div>
+          </td>
+          <td>
+            <span class="badge badge-{{ att.status.value }}">{{ att.status.value }}</span>
+            <div class="note">{{ att.note }}</div>
+          </td>
+          <td>
+            {% if att.actual_sha256 %}
+              <div class="digest">{{ att.actual_sha256 }}</div>
+              <div class="note">{% if att.size_bytes is not none %}{{ att.size_bytes }} 字节{% endif %}</div>
+            {% else %}
+              <span class="note">未取得实际文件</span>
+            {% endif %}
+          </td>
+          <td>
+            <ul class="sources">
+              {% for ann in att.annotations %}
+              <li>
+                {% if ann.notice_type %}<span class="tag">{{ ann.notice_type }}</span>{% endif %}
+                <span class="tag">{{ ann.project_no }}</span>
+                标注：
+                {% if ann.declared_digests %}
+                  {% for digest in ann.declared_digests %}<span class="digest ann-digest">{{ digest }}</span>{% if not loop.last %}<br>{% endif %}{% endfor %}
+                {% else %}
+                  <span class="note">未标注摘要</span>
+                {% endif %}
+                <div class="note">来源公告：<a href="/view?url={{ ann.announcement_url|urlencode }}" target="_blank">{{ ann.announcement_url }}</a></div>
+              </li>
+              {% endfor %}
+            </ul>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if attachments.errors %}
+    <div class="errors" style="margin-top:12px;">
+      <strong>核验过程中的抓取错误（相关附件不能视为通过）</strong>
+      <ul>{% for err in attachments.errors %}<li>{{ err }}</li>{% endfor %}</ul>
     </div>
     {% endif %}
   </div>

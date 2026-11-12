@@ -13,6 +13,7 @@ import re
 
 from bs4 import BeautifulSoup
 
+from .attachments import extract_attachments
 from .models import Announcement
 from .utils import strip_label
 
@@ -91,9 +92,11 @@ def _collect_labeled_pairs(soup: BeautifulSoup) -> dict[str, str]:
 
     # 4. 正文文本中的「标签：值」
     for element in soup.find_all(["p", "div", "li", "span"]):
-        # 只取直接文本，避免父容器把子段落重复收进来
-        own_text = "".join(str(child) for child in element.children if not getattr(child, "name", None))
-        own_text += element.string or ""
+        # 只取直接文本节点，避免父容器把子段落重复收进来；
+        # 单个文本节点既是直接子节点、也可能是 element.string，只取一次
+        own_text = "".join(
+            str(child) for child in element.children if not getattr(child, "name", None)
+        )
         for match in re.finditer(
             r"([一-龥A-Za-z]{2,12}?)\s*[：:]\s*([^\n\r<，,。；;]{1,60})",
             own_text,
@@ -161,4 +164,5 @@ def parse_detail(html: str, url: str) -> Announcement:
         publish_time=fields.get("publish_time", ""),
         deadline=deadline,
         declares_extension=declares_extension,
+        attachments=extract_attachments(html, url),
     )
